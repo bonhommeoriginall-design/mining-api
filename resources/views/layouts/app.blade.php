@@ -36,6 +36,7 @@
                     @endunless
                     <a href="{{ route('chat.index') }}"
                        class="nav-link {{ request()->routeIs('chat.*') ? 'active' : '' }}"
+                       id="sidebar-new-chat"
                        title="Nouveau chat">
                         <span class="nav-icon">💬</span>
                         <span>Nouveau chat</span>

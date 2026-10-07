@@ -1874,6 +1874,43 @@ nav[aria-label] { margin-top: 20px; }
     font-style: italic;
 }
 
+.chat-ask-error {
+    border: 1px solid #f0c7c7;
+}
+
+.chat-retry-btn {
+    display: inline-flex;
+    margin-top: 10px;
+    border: 1px solid var(--border, #d0d5dd);
+    background: transparent;
+    color: inherit;
+    border-radius: 999px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.chat-retry-btn:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.chat-page-staff.chat-staff-dark .chat-ask-error {
+    border-color: #5c3030;
+}
+
+.chat-page-staff.chat-staff-dark .chat-retry-btn,
+.agent-msg .chat-retry-btn {
+    border-color: #555;
+    color: #f2f2f2;
+}
+
+.chat-page-staff.chat-staff-dark .chat-retry-btn:hover,
+.agent-msg .chat-retry-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
 .chat-form {
     display: flex;
     gap: 12px;
@@ -3915,6 +3952,12 @@ body.agent-profile-open {
 .agent-typing {
     opacity: 0.6;
     font-style: italic;
+}
+
+.agent-msg.chat-ask-error {
+    border: 1px solid #5c3030;
+    border-radius: 12px;
+    padding: 10px 12px;
 }
 
 .agent-citations {

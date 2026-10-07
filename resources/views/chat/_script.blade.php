@@ -18,6 +18,11 @@
     const history = new MiningChatHistory(userId);
 
     let sessionMessages = [...initialMessages];
+    let askSeq = 0;
+    let askController = null;
+    let clearPromise = null;
+    let needsServerClear = false;
+    const ASK_TIMEOUT_MS = 50000;
 
     function escapeHtml(text) {
         const div = document.createElement('div');
@@ -140,18 +145,189 @@
         }
     }
 
-    function appendTyping() {
+    function appendTyping(seq) {
+        removeTyping();
         const thread = ensureThread();
         const el = document.createElement('div');
         el.className = isDark() ? 'agent-msg agent-msg-ai agent-typing' : 'chat-bubble chat-bubble-ai chat-typing';
         el.id = 'chat-typing';
+        el.dataset.seq = String(seq);
         el.textContent = 'Réflexion en cours…';
         thread.appendChild(el);
         messages.scrollTop = messages.scrollHeight;
     }
 
-    function removeTyping() {
-        document.getElementById('chat-typing')?.remove();
+    function removeTyping(seq = null) {
+        document.querySelectorAll('#chat-typing').forEach((el) => {
+            if (seq === null || el.dataset.seq === String(seq)) {
+                el.remove();
+            }
+        });
+    }
+
+    function abortPendingAsk() {
+        askSeq += 1;
+        askController?.abort();
+        askController = null;
+        removeTyping();
+    }
+
+    function askErrorText(err) {
+        if (err && err.name === 'AbortError') {
+            return 'Le serveur n’a pas répondu à temps. Vous pouvez réessayer.';
+        }
+        if (err && err.status >= 500) {
+            return 'Le serveur n’a pas pu répondre. Vous pouvez réessayer.';
+        }
+        if (err && err.status >= 400) {
+            return 'La question n’a pas pu être envoyée. Vous pouvez réessayer.';
+        }
+        return 'Impossible de joindre le serveur. Vérifiez votre connexion, puis réessayez.';
+    }
+
+    function clearAskErrors() {
+        messages?.querySelectorAll('[data-ask-error]').forEach((el) => el.remove());
+    }
+
+    function appendAskError(text, retryText) {
+        const thread = ensureThread();
+        const bubble = document.createElement('div');
+        bubble.className = isDark()
+            ? 'agent-msg agent-msg-ai chat-ask-error'
+            : 'chat-bubble chat-bubble-ai chat-ask-error';
+        bubble.dataset.askError = '1';
+
+        const body = document.createElement('div');
+        body.className = isDark() ? 'agent-msg-content' : 'chat-bubble-text';
+        body.textContent = text;
+        bubble.appendChild(body);
+
+        if (retryText) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-retry-btn';
+            btn.textContent = 'Réessayer';
+            btn.addEventListener('click', () => {
+                btn.disabled = true;
+                bubble.remove();
+                askQuestion(retryText);
+            });
+            bubble.appendChild(btn);
+        }
+
+        thread.appendChild(bubble);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    function clearServerHistory() {
+        if (!clearPromise) {
+            clearPromise = (async () => {
+                try {
+                    for (let attempt = 0; attempt < 2; attempt += 1) {
+                        try {
+                            const res = await fetch('{{ route('chat.clear') }}', {
+                                method: 'POST',
+                                headers: {
+                                    'X-CSRF-TOKEN': csrf,
+                                    'Accept': 'application/json',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                },
+                            });
+                            if (res.ok) return true;
+                        } catch {
+                            // nouvel essai
+                        }
+                    }
+                    return false;
+                } finally {
+                    clearPromise = null;
+                }
+            })();
+        }
+        return clearPromise;
+    }
+
+    async function askQuestion(text) {
+        if (needsServerClear) {
+            if (submitBtn) submitBtn.disabled = true;
+            const cleared = await clearServerHistory();
+            needsServerClear = !cleared;
+            if (!cleared) {
+                appendAskError('Impossible d’effacer l’ancienne conversation sur le serveur. Relancez « Nouveau chat », puis réessayez.');
+                if (submitBtn) submitBtn.disabled = false;
+                input?.focus();
+                return;
+            }
+        }
+
+        askController?.abort();
+        const seq = ++askSeq;
+        const controller = new AbortController();
+        askController = controller;
+        const timer = setTimeout(() => controller.abort(), ASK_TIMEOUT_MS);
+        if (submitBtn) submitBtn.disabled = true;
+        clearAskErrors();
+        appendTyping(seq);
+
+        try {
+            const res = await fetch('{{ route('chat.ask') }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrf,
+                },
+                body: JSON.stringify({ message: text }),
+                signal: controller.signal,
+            });
+
+            if (seq !== askSeq) return;
+
+            let data = {};
+            try {
+                data = await res.json();
+            } catch {
+                data = {};
+            }
+
+            if (seq !== askSeq) return;
+            removeTyping(seq);
+
+            if (!res.ok || typeof data.reply !== 'string' || data.reply === '') {
+                const error = new Error('http');
+                error.status = res.ok ? 502 : res.status;
+                throw error;
+            }
+
+            const aiMsg = {
+                id: `a_${Date.now()}`,
+                text: data.reply,
+                is_user: false,
+                citations: data.citations || [],
+                used_llm: !!data.used_llm,
+                at: new Date().toISOString(),
+            };
+            sessionMessages.push(aiMsg);
+            persistSessionMessages();
+
+            appendMessage({
+                text: data.reply,
+                isUser: false,
+                citations: data.citations,
+                usedLlm: data.used_llm,
+            });
+        } catch (err) {
+            if (seq !== askSeq) return;
+            removeTyping(seq);
+            appendAskError(askErrorText(err), text);
+        } finally {
+            clearTimeout(timer);
+            if (askController === controller) askController = null;
+            if (seq === askSeq && submitBtn) {
+                submitBtn.disabled = false;
+                input?.focus();
+            }
+        }
     }
 
     async function restoreOnServer(conversationId, msgs) {
@@ -266,21 +442,40 @@
         if (!skipConfirm && sessionMessages.length && !await confirmNewChat()) {
             return;
         }
-        persistSessionMessages();
-        await fetch('{{ route('chat.clear') }}', {
-            method: 'POST',
-            headers: { 'X-CSRF-TOKEN': csrf, 'Accept': 'application/json' },
-        });
+
+        const archived = sessionMessages.slice();
+        const shouldArchive = !skipConfirm && archived.length > 0;
+
+        abortPendingAsk();
         sessionMessages = [];
-        history.setActiveId(null);
         renderAllMessages([]);
         closeHistoryPanel();
+        if (submitBtn) submitBtn.disabled = false;
+
+        if (shouldArchive) {
+            history.saveConversation(archived);
+        }
+        history.setActiveId(null);
         input?.focus();
+
+        needsServerClear = true;
+        const cleared = await clearServerHistory();
+        needsServerClear = !cleared;
+        if (!cleared) {
+            appendAskError('La conversation affichée est vide, mais le serveur n’a pas confirmé l’effacement. Relancez « Nouveau chat » avant d’envoyer un message.');
+        }
     }
 
     async function loadConversation(conversationId) {
         const conv = history.findById(conversationId);
         if (!conv) return;
+
+        abortPendingAsk();
+        if (submitBtn) submitBtn.disabled = false;
+        if (clearPromise) {
+            await clearPromise;
+        }
+        needsServerClear = false;
 
         sessionMessages = conv.messages.map((m) => ({ ...m }));
         history.setActiveId(conv.id);
@@ -369,10 +564,10 @@
         }
     });
 
-    form?.addEventListener('submit', async (e) => {
+    form?.addEventListener('submit', (e) => {
         e.preventDefault();
         const text = input.value.trim();
-        if (!text) return;
+        if (!text || submitBtn?.disabled) return;
 
         const userMsg = {
             id: `u_${Date.now()}`,
@@ -385,56 +580,15 @@
         appendMessage({ text, isUser: true, citations: [] });
         input.value = '';
         autoResizeInput();
-        submitBtn.disabled = true;
-        appendTyping();
-
-        try {
-            const res = await fetch('{{ route('chat.ask') }}', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'X-CSRF-TOKEN': csrf,
-                },
-                body: JSON.stringify({ message: text }),
-            });
-            const data = await res.json();
-            removeTyping();
-            if (!res.ok) throw new Error(data.message || 'Erreur serveur');
-
-            const aiMsg = {
-                id: `a_${Date.now()}`,
-                text: data.reply,
-                is_user: false,
-                citations: data.citations || [],
-                used_llm: !!data.used_llm,
-                at: new Date().toISOString(),
-            };
-            sessionMessages.push(aiMsg);
-            persistSessionMessages();
-
-            appendMessage({
-                text: data.reply,
-                isUser: false,
-                citations: data.citations,
-                usedLlm: data.used_llm,
-            });
-        } catch (err) {
-            removeTyping();
-            sessionMessages.pop();
-            appendMessage({
-                text: 'Désolé, une erreur est survenue : ' + err.message,
-                isUser: false,
-                citations: [],
-            });
-        } finally {
-            submitBtn.disabled = false;
-            input.focus();
-        }
+        askQuestion(text);
     });
 
     document.getElementById('agent-new-chat')?.addEventListener('click', () => newChat(false));
     document.getElementById('chat-clear')?.addEventListener('click', () => newChat(false));
+    document.getElementById('sidebar-new-chat')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        newChat(false);
+    });
 
     syncInitialSessionToHistory();
 
